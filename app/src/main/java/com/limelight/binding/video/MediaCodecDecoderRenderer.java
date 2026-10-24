@@ -1389,7 +1389,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     @Override
     public int submitDecodeUnit(byte[] decodeUnitData, int decodeUnitLength, int decodeUnitType,
                                 int frameNumber, int frameType, char frameHostProcessingLatency,
-                                long receiveTimeUs, long enqueueTimeUs, long nativeCallbackTimeUs) {
+                                long receiveTimeUs, long enqueueTimeUs, long nativeCallbackTimeUs,
+                                long dequeueTimeUs, int queueDepthAtEnqueue, int queueDepthAfterDequeue) {
         if (stopping) {
             // Don't bother if we're stopping
             return MoonBridge.DR_OK;
@@ -1399,6 +1400,10 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 decodeUnitType, decodeUnitLength, receiveTimeUs, enqueueTimeUs);
         frameTimingLog.record(FrameTimingLog.NATIVE_CALLBACK_TIMING, frameNumber, -1,
                 receiveTimeUs, enqueueTimeUs, nativeCallbackTimeUs, nativeCallbackTimeUs - enqueueTimeUs);
+        if (dequeueTimeUs > 0) {
+            frameTimingLog.record(FrameTimingLog.NATIVE_QUEUE_TIMING, frameNumber, -1,
+                    dequeueTimeUs, queueDepthAtEnqueue, queueDepthAfterDequeue, dequeueTimeUs - enqueueTimeUs);
+        }
 
         if (lastFrameNumber == 0) {
             activeWindowVideoStats.measurementStartTimestamp = SystemClock.uptimeMillis();

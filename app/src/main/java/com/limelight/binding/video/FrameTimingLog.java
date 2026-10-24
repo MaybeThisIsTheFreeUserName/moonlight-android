@@ -28,6 +28,7 @@ final class FrameTimingLog {
     static final int NATIVE_CALLBACK_TIMING = 8;
     static final int OUTPUT_QUEUE_ENQUEUE = 9;
     static final int FRAME_NUMBER_GAP = 10;
+    static final int NATIVE_QUEUE_TIMING = 11;
 
     private final Context context;
     private final AtomicLong nextSequence = new AtomicLong();
@@ -163,6 +164,10 @@ final class FrameTimingLog {
                 writer.write("{\"previous_frame_no\":" + a + ",\"current_frame_no\":" + b +
                         ",\"missing_frames\":" + c + ",\"reserved\":" + d);
                 break;
+            case NATIVE_QUEUE_TIMING:
+                writer.write("{\"native_dequeue_rel_us\":" + a + ",\"queue_depth_before_enqueue\":" + b +
+                        ",\"queue_depth_after_dequeue\":" + c + ",\"queue_wait_us\":" + d);
+                break;
             default:
                 writer.write("{\"a\":" + a + ",\"b\":" + b +
                         ",\"c\":" + c + ",\"d\":" + d);
@@ -183,6 +188,7 @@ final class FrameTimingLog {
             case NATIVE_CALLBACK_TIMING: return "native_callback_timing";
             case OUTPUT_QUEUE_ENQUEUE: return "output_queue_enqueue";
             case FRAME_NUMBER_GAP: return "frame_number_gap";
+            case NATIVE_QUEUE_TIMING: return "native_queue_timing";
             default: return "unknown";
         }
     }
