@@ -25,6 +25,7 @@ final class FrameTimingLog {
     static final int OUTPUT_BUFFER_DROP = 5;
     static final int SURFACE_RELEASE = 6;
     static final int OUTPUT_QUEUE_DROP = 7;
+    static final int NATIVE_CALLBACK_TIMING = 8;
 
     private final Context context;
     private final AtomicLong nextSequence = new AtomicLong();
@@ -148,6 +149,10 @@ final class FrameTimingLog {
                 writer.write("{\"output_index\":" + a + ",\"queue_size_after_drop\":" + b +
                         ",\"queue_capacity\":" + c + ",\"reserved\":" + d);
                 break;
+            case NATIVE_CALLBACK_TIMING:
+                writer.write("{\"native_receive_rel_us\":" + a + ",\"native_enqueue_rel_us\":" + b +
+                        ",\"native_callback_rel_us\":" + c + ",\"callback_minus_enqueue_us\":" + d);
+                break;
             default:
                 writer.write("{\"a\":" + a + ",\"b\":" + b +
                         ",\"c\":" + c + ",\"d\":" + d);
@@ -165,6 +170,7 @@ final class FrameTimingLog {
             case OUTPUT_BUFFER_DROP: return "output_buffer_drop";
             case SURFACE_RELEASE: return "surface_release";
             case OUTPUT_QUEUE_DROP: return "output_queue_drop";
+            case NATIVE_CALLBACK_TIMING: return "native_callback_timing";
             default: return "unknown";
         }
     }
