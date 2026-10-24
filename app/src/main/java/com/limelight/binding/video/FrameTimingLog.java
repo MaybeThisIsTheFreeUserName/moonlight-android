@@ -175,7 +175,7 @@ final class FrameTimingLog {
         switch (eventCode) {
             case SESSION_START: return "session_start";
             case DECODE_UNIT_SUBMIT: return "decode_unit_submit";
-            case CODEC_INPUT_QUEUE: return "codec_input_queue";
+            case CODEC_INPUT_QUEUE: return "codec_input_queue_attempt";
             case CODEC_OUTPUT: return "codec_output";
             case OUTPUT_BUFFER_DROP: return "output_buffer_drop";
             case SURFACE_RELEASE: return "surface_release";
