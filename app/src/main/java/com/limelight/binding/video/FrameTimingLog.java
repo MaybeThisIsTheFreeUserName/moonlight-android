@@ -12,9 +12,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Low-overhead, fixed-capacity frame timing recorder for diagnostic builds.
- *
- * Events are stored as primitive values in a preallocated ring. JSON formatting and disk I/O
- * happen only when the stream renderer is cleaned up.
+ * Events use primitive arrays; JSON formatting and disk I/O happen during cleanup only.
  */
 final class FrameTimingLog {
     private static final String TAG = "FrameTimingLog";
@@ -27,7 +25,6 @@ final class FrameTimingLog {
     static final int OUTPUT_BUFFER_DROP = 5;
     static final int SURFACE_RELEASE = 6;
     static final int OUTPUT_QUEUE_DROP = 7;
-    static final int CODEC_OUTPUT_FORMAT = 8;
 
     private final Context context;
     private final AtomicLong nextSequence = new AtomicLong();
@@ -54,7 +51,6 @@ final class FrameTimingLog {
 
         long seq = nextSequence.getAndIncrement();
         int slot = (int) (seq % CAPACITY);
-
         timeNs[slot] = System.nanoTime();
         event[slot] = eventCode;
         frameNumber[slot] = frameNo;
@@ -63,8 +59,7 @@ final class FrameTimingLog {
         b[slot] = valueB;
         c[slot] = valueC;
         d[slot] = valueD;
-
-        // Publish the slot only after all fields have been written.
+        // Publish the slot after all fields have been written.
         sequence[slot] = seq + 1;
     }
 
@@ -109,8 +104,9 @@ final class FrameTimingLog {
                 } else {
                     writer.write(Long.toString(ptsUs[slot]));
                 }
-                writer.write(",\"data\":{\"a\":" + a[slot] + ",\"b\":" + b[slot] +
-                        ",\"c\":" + c[slot] + ",\"d\":" + d[slot] + "}}\n");
+                writer.write(",\"data\":");
+                writeEventData(writer, event[slot], a[slot], b[slot], c[slot], d[slot]);
+                writer.write("}\n");
             }
         } catch (Exception e) {
             Log.e(TAG, "Failed to write frame timing log", e);
@@ -119,6 +115,45 @@ final class FrameTimingLog {
 
         Log.i(TAG, "Frame timing log written: " + file.getAbsolutePath());
         return file;
+    }
+
+    private static void writeEventData(BufferedWriter writer, int eventCode,
+                                       long a, long b, long c, long d) throws java.io.IOException {
+        switch (eventCode) {
+            case SESSION_START:
+                writer.write("{\"width\":" + a + ",\"height\":" + b +
+                        ",\"fps\":" + c + ",\"frame_pacing_mode\":" + d);
+                break;
+            case DECODE_UNIT_SUBMIT:
+                writer.write("{\"decode_unit_type\":" + a + ",\"length\":" + b +
+                        ",\"native_receive_rel_us\":" + c + ",\"native_enqueue_rel_us\":" + d);
+                break;
+            case CODEC_INPUT_QUEUE:
+                writer.write("{\"input_size\":" + a + ",\"codec_flags\":" + b +
+                        ",\"decode_unit_type\":" + c + ",\"reserved\":" + d);
+                break;
+            case CODEC_OUTPUT:
+                writer.write("{\"output_index\":" + a + ",\"flags\":" + b +
+                        ",\"size\":" + c + ",\"reserved\":" + d);
+                break;
+            case OUTPUT_BUFFER_DROP:
+                writer.write("{\"output_index\":" + a + ",\"reason_code\":" + b +
+                        ",\"detail\":" + c + ",\"reserved\":" + d);
+                break;
+            case SURFACE_RELEASE:
+                writer.write("{\"output_index\":" + a + ",\"release_mode\":" + b +
+                        ",\"reserved\":" + c + ",\"render_timestamp_ns\":" + d);
+                break;
+            case OUTPUT_QUEUE_DROP:
+                writer.write("{\"output_index\":" + a + ",\"queue_size_after_drop\":" + b +
+                        ",\"queue_capacity\":" + c + ",\"reserved\":" + d);
+                break;
+            default:
+                writer.write("{\"a\":" + a + ",\"b\":" + b +
+                        ",\"c\":" + c + ",\"d\":" + d);
+                break;
+        }
+        writer.write("}");
     }
 
     private static String eventName(int eventCode) {
@@ -130,7 +165,6 @@ final class FrameTimingLog {
             case OUTPUT_BUFFER_DROP: return "output_buffer_drop";
             case SURFACE_RELEASE: return "surface_release";
             case OUTPUT_QUEUE_DROP: return "output_queue_drop";
-            case CODEC_OUTPUT_FORMAT: return "codec_output_format";
             default: return "unknown";
         }
     }
