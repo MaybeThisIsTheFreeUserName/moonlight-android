@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
+
 import org.jcodec.codecs.h264.H264Utils;
 import org.jcodec.codecs.h264.io.model.SeqParameterSet;
 import org.jcodec.codecs.h264.io.model.VUIParameters;
@@ -114,7 +115,18 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     private int refreshRate;
     private PreferenceConfiguration prefs;
 
-    private LinkedBlockingQueue<Integer> outputBufferQueue = new LinkedBlockingQueue<>();
+    private static final class OutputBufferRecord {
+        final int index;
+        final long ptsUs;
+
+        OutputBufferRecord(int index, long ptsUs) {
+            this.index = index;
+            this.ptsUs = ptsUs;
+        }
+    }
+
+    private LinkedBlockingQueue<OutputBufferRecord> outputBufferQueue = new LinkedBlockingQueue<>();
+    private FrameTimingLog frameTimingLog;
     private static final int OUTPUT_BUFFER_QUEUE_LIMIT = 2;
     private long lastRenderedFrameTimeNanos;
     private HandlerThread choreographerHandlerThread;
@@ -281,6 +293,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
         this.context = activity;
         this.activity = activity;
+        this.frameTimingLog = new FrameTimingLog(activity);
         this.prefs = prefs;
         this.crashListener = crashListener;
         this.consecutiveCrashCount = consecutiveCrashCount;
@@ -681,6 +694,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         this.videoFormat = format;
         this.refreshRate = redrawRate;
 
+        frameTimingLog.record(FrameTimingLog.SESSION_START, -1, -1,
+                width, height, prefs.fps, prefs.framePacing);
         return initializeDecoder(false);
     }
 
@@ -963,17 +978,21 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             // NB: Since the queue limit is 2, we won't starve the decoder of output buffers
             // by holding onto them for too long. This also ensures we will have that 1 extra
             // frame of buffer to smooth over network/rendering jitter.
-            Integer nextOutputBuffer = outputBufferQueue.poll();
+            OutputBufferRecord nextOutputBuffer = outputBufferQueue.poll();
             if (nextOutputBuffer != null) {
                 try {
-                    videoDecoder.releaseOutputBuffer(nextOutputBuffer, frameTimeNanos);
+                    videoDecoder.releaseOutputBuffer(nextOutputBuffer.index, frameTimeNanos);
+                    frameTimingLog.record(FrameTimingLog.SURFACE_RELEASE, -1, nextOutputBuffer.ptsUs,
+                            nextOutputBuffer.index, 1, 0, frameTimeNanos);
 
                     lastRenderedFrameTimeNanos = frameTimeNanos;
                     activeWindowVideoStats.totalFramesRendered++;
                 } catch (IllegalStateException ignored) {
                     try {
                         // Try to avoid leaking the output buffer by releasing it without rendering
-                        videoDecoder.releaseOutputBuffer(nextOutputBuffer, false);
+                        videoDecoder.releaseOutputBuffer(nextOutputBuffer.index, false);
+                        frameTimingLog.record(FrameTimingLog.OUTPUT_BUFFER_DROP, -1, nextOutputBuffer.ptsUs,
+                                nextOutputBuffer.index, 2, 0, 0);
                     } catch (IllegalStateException e) {
                         // This will leak nextOutputBuffer, but there's really nothing else we can do
                         e.printStackTrace();
@@ -1025,32 +1044,46 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                             long presentationTimeUs = info.presentationTimeUs;
                             int lastIndex = outIndex;
 
+                            frameTimingLog.record(FrameTimingLog.CODEC_OUTPUT, -1, presentationTimeUs,
+                                    outIndex, info.flags, info.size, 0);
                             numFramesOut++;
 
                             // Render the latest frame now if frame pacing isn't in balanced mode
                             if (prefs.framePacing != PreferenceConfiguration.FRAME_PACING_BALANCED) {
                                 // Get the last output buffer in the queue
                                 while ((outIndex = videoDecoder.dequeueOutputBuffer(info, 0)) >= 0) {
+                                    frameTimingLog.record(FrameTimingLog.OUTPUT_BUFFER_DROP, -1, presentationTimeUs,
+                                            lastIndex, 0, 0, 0);
                                     videoDecoder.releaseOutputBuffer(lastIndex, false);
 
                                     numFramesOut++;
 
                                     lastIndex = outIndex;
                                     presentationTimeUs = info.presentationTimeUs;
+                                    frameTimingLog.record(FrameTimingLog.CODEC_OUTPUT, -1, presentationTimeUs,
+                                            outIndex, info.flags, info.size, 0);
                                 }
 
+                                long releaseTimestampNs;
+                                int releaseKind;
                                 if (prefs.framePacing == PreferenceConfiguration.FRAME_PACING_MAX_SMOOTHNESS ||
                                         prefs.framePacing == PreferenceConfiguration.FRAME_PACING_CAP_FPS) {
                                     // In max smoothness or cap FPS mode, we want to never drop frames
                                     // Use a PTS that will cause this frame to never be dropped
-                                    videoDecoder.releaseOutputBuffer(lastIndex, 0);
+                                    releaseTimestampNs = 0;
+                                    releaseKind = 0;
+                                    videoDecoder.releaseOutputBuffer(lastIndex, releaseTimestampNs);
                                 }
                                 else {
                                     // Use a PTS that will cause this frame to be dropped if another comes in within
                                     // the same V-sync period
-                                    videoDecoder.releaseOutputBuffer(lastIndex, System.nanoTime());
+                                    releaseTimestampNs = System.nanoTime();
+                                    releaseKind = 2;
+                                    videoDecoder.releaseOutputBuffer(lastIndex, releaseTimestampNs);
                                 }
 
+                                frameTimingLog.record(FrameTimingLog.SURFACE_RELEASE, -1, presentationTimeUs,
+                                        lastIndex, releaseKind, 0, releaseTimestampNs);
                                 activeWindowVideoStats.totalFramesRendered++;
                             }
                             else {
@@ -1064,7 +1097,10 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                 // refresh rate).
                                 if (outputBufferQueue.size() == OUTPUT_BUFFER_QUEUE_LIMIT) {
                                     try {
-                                        videoDecoder.releaseOutputBuffer(outputBufferQueue.take(), false);
+                                        OutputBufferRecord dropped = outputBufferQueue.take();
+                                        videoDecoder.releaseOutputBuffer(dropped.index, false);
+                                        frameTimingLog.record(FrameTimingLog.OUTPUT_QUEUE_DROP, -1, dropped.ptsUs,
+                                                dropped.index, outputBufferQueue.size(), OUTPUT_BUFFER_QUEUE_LIMIT, 0);
                                     } catch (InterruptedException e) {
                                         // We're shutting down, so we can just drop this buffer on the floor
                                         // and it will be reclaimed when the codec is released.
@@ -1073,7 +1109,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                 }
 
                                 // Add this buffer
-                                outputBufferQueue.add(lastIndex);
+                                outputBufferQueue.add(new OutputBufferRecord(lastIndex, presentationTimeUs));
+                                frameTimingLog.record(FrameTimingLog.OUTPUT_QUEUE_ENQUEUE, -1, presentationTimeUs,
+                                        lastIndex, outputBufferQueue.size(), OUTPUT_BUFFER_QUEUE_LIMIT, 0);
                             }
 
                             // Add delta time to the totals (excluding probable outliers)
@@ -1247,6 +1285,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
     @Override
     public void cleanup() {
+        if (frameTimingLog != null) {
+            java.io.File logFile = frameTimingLog.dump();
+            if (logFile != null) {
+                LimeLog.info("Frame timing log: " + logFile.getAbsolutePath());
+            }
+        }
         videoDecoder.release();
     }
 
@@ -1345,10 +1389,20 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
     @Override
     public int submitDecodeUnit(byte[] decodeUnitData, int decodeUnitLength, int decodeUnitType,
                                 int frameNumber, int frameType, char frameHostProcessingLatency,
-                                long receiveTimeUs, long enqueueTimeUs) {
+                                long receiveTimeUs, long enqueueTimeUs, long nativeCallbackTimeUs,
+                                long dequeueTimeUs, int queueDepthAtEnqueue, int queueDepthAfterDequeue) {
         if (stopping) {
             // Don't bother if we're stopping
             return MoonBridge.DR_OK;
+        }
+
+        frameTimingLog.record(FrameTimingLog.DECODE_UNIT_SUBMIT, frameNumber, -1,
+                decodeUnitType, decodeUnitLength, receiveTimeUs, enqueueTimeUs);
+        frameTimingLog.record(FrameTimingLog.NATIVE_CALLBACK_TIMING, frameNumber, -1,
+                receiveTimeUs, enqueueTimeUs, nativeCallbackTimeUs, nativeCallbackTimeUs - enqueueTimeUs);
+        if (dequeueTimeUs > 0) {
+            frameTimingLog.record(FrameTimingLog.NATIVE_QUEUE_TIMING, frameNumber, -1,
+                    dequeueTimeUs, queueDepthAtEnqueue, queueDepthAfterDequeue, dequeueTimeUs - enqueueTimeUs);
         }
 
         if (lastFrameNumber == 0) {
@@ -1356,6 +1410,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         } else if (frameNumber != lastFrameNumber && frameNumber != lastFrameNumber + 1) {
             // We can receive the same "frame" multiple times if it's an IDR frame.
             // In that case, each frame start NALU is submitted independently.
+            frameTimingLog.record(FrameTimingLog.FRAME_NUMBER_GAP, frameNumber, -1,
+                    lastFrameNumber, frameNumber, frameNumber - lastFrameNumber - 1, 0);
             activeWindowVideoStats.framesLost += frameNumber - lastFrameNumber - 1;
             activeWindowVideoStats.totalFrames += frameNumber - lastFrameNumber - 1;
             activeWindowVideoStats.frameLossEvents++;
@@ -1698,6 +1754,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         // Copy data from our buffer list into the input buffer
         nextInputBuffer.put(decodeUnitData, 0, decodeUnitLength);
 
+        frameTimingLog.record(FrameTimingLog.CODEC_INPUT_QUEUE, frameNumber, timestampUs,
+                decodeUnitLength, codecFlags, decodeUnitType, 0);
         if (!queueNextInputBuffer(timestampUs, codecFlags)) {
             return MoonBridge.DR_NEED_IDR;
         }
