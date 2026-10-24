@@ -1110,6 +1110,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
                                 // Add this buffer
                                 outputBufferQueue.add(new OutputBufferRecord(lastIndex, presentationTimeUs));
+                                frameTimingLog.record(FrameTimingLog.OUTPUT_QUEUE_ENQUEUE, -1, presentationTimeUs,
+                                        lastIndex, outputBufferQueue.size(), OUTPUT_BUFFER_QUEUE_LIMIT, 0);
                             }
 
                             // Add delta time to the totals (excluding probable outliers)
@@ -1403,6 +1405,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         } else if (frameNumber != lastFrameNumber && frameNumber != lastFrameNumber + 1) {
             // We can receive the same "frame" multiple times if it's an IDR frame.
             // In that case, each frame start NALU is submitted independently.
+            frameTimingLog.record(FrameTimingLog.FRAME_NUMBER_GAP, frameNumber, -1,
+                    lastFrameNumber, frameNumber, frameNumber - lastFrameNumber - 1, 0);
             activeWindowVideoStats.framesLost += frameNumber - lastFrameNumber - 1;
             activeWindowVideoStats.totalFrames += frameNumber - lastFrameNumber - 1;
             activeWindowVideoStats.frameLossEvents++;
